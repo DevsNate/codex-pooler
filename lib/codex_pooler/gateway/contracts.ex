@@ -93,6 +93,14 @@ defmodule CodexPooler.Gateway.Contracts do
           optional(:headers) => response_headers(),
           required(:stream) => stream_callback()
         }
+  @type deferred_stream_result :: %{
+          required(:status) => pos_integer(),
+          optional(:headers) => response_headers(),
+          required(:deferred_stream) => (Plug.Conn.t() ->
+                                           {:ok, Plug.Conn.t()}
+                                           | {:error, gateway_error()}
+                                           | {:error, term(), Plug.Conn.t()})
+        }
   @type websocket_stream_result :: %{
           required(:status) => pos_integer(),
           optional(:headers) => response_headers(),
@@ -107,6 +115,7 @@ defmodule CodexPooler.Gateway.Contracts do
           body_result()
           | raw_body_result()
           | stream_result()
+          | deferred_stream_result()
           | websocket_stream_result()
           | websocket_messages_result()
 

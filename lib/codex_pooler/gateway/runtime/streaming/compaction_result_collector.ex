@@ -60,16 +60,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.CompactionResultCollector do
   @spec collect(Req.Response.t(), SelectedCandidateContext.t(), map()) ::
           {:ok, map()} | {:error, map()}
   def collect(response, %SelectedCandidateContext{} = context, finalization_callbacks) do
-    response_context = %ResponseContext{context: context, response: response}
-
-    item_mode =
-      if context.request_options.openai_compatibility.source_endpoint == "/v1/responses",
-        do: :public,
-        else: :native
-
-    state = new_state(item_mode)
-
-    case StreamRelay.run(state, response, handlers(response_context, finalization_callbacks)) do
+    case relay(response, context, finalization_callbacks, &StreamRelay.run/3) do
       {:ok, state} ->
         case state |> finalize_sse_state() |> compact_result() do
           {:ok, result} ->
@@ -92,6 +83,23 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.CompactionResultCollector do
         {:error, error}
     end
   end
+
+  # Both buffered and live HTTP delivery use the same validator and accounting
+  # handlers. The delivery layer may wrap the relay, but cannot bypass validation.
+  @spec relay(Req.Response.t(), SelectedCandidateContext.t(), map(), function()) :: tuple()
+  def relay(response, %SelectedCandidateContext{} = context, finalization_callbacks, run) do
+    response_context = %ResponseContext{context: context, response: response}
+
+    item_mode =
+      if context.request_options.openai_compatibility.source_endpoint == "/v1/responses",
+        do: :public,
+        else: :native
+
+    run.(new_state(item_mode), response, handlers(response_context, finalization_callbacks))
+  end
+
+  @spec result(map()) :: {:ok, map()} | {:error, map()}
+  def result(state), do: state |> finalize_sse_state() |> compact_result()
 
   # `terminal_source` names who sent the terminal on the decision line: the
   # provider, or the Pooler's connection-bound guard, whose refusal passes
@@ -264,7 +272,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.CompactionResultCollector do
             case Finalization.finalize_stream_failure(
                    "",
                    {:terminal_stream_failure, saved_terminal_failure(state, reason_code)},
-                   %{response_context | client_response_status: client_status},
+                   %{response_context | client_response_status: Map.get(state, :client_response_status, client_status)},
                    state
                  ) do
               {:ok, _finalized} -> {:error, gateway_error}
@@ -276,7 +284,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.CompactionResultCollector do
         Finalization.finalize_stream_failure(
           "",
           compaction_failure_reason(reason),
-          response_context,
+          %{response_context | client_response_status: Map.get(state, :client_response_status, response_context.client_response_status)},
           state
         )
       end,

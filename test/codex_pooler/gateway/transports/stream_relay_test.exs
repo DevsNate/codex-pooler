@@ -319,6 +319,35 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamRelayTest do
     assert_receive {:legacy_finalize_success, "visible"}, @relay_timeout
   end
 
+  test "failed keepalive preserves committed state and cancels and finalizes once" do
+    parent = self()
+    ref = make_ref()
+    response = async_response(ref, fn ^ref -> send(parent, :keepalive_cancelled) end)
+
+    task =
+      Task.async(fn ->
+        StreamRelay.run(
+          :uncommitted,
+          response,
+          Map.merge(handlers(), %{
+            keepalive_interval_ms: 1,
+            write_keepalive: fn :uncommitted -> {:error, :closed, :committed} end,
+            finalize_success: fn _body -> flunk("closed keepalive must not succeed") end,
+            finalize_failure: fn body, reason, state ->
+              send(parent, {:keepalive_finalized, body, reason, state})
+              {:error, reason}
+            end
+          })
+        )
+      end)
+
+    assert Task.await(task, @relay_timeout) == {:error, {:chunk, :closed}}
+    assert_receive :keepalive_cancelled, @relay_timeout
+    assert_receive {:keepalive_finalized, "", {:chunk, :closed}, :committed}, @relay_timeout
+    refute_received :keepalive_cancelled
+    refute_received {:keepalive_finalized, _, _, _}
+  end
+
   test "success finalization keeps only a bounded retained body while writing all chunks" do
     parent = self()
     ref = make_ref()

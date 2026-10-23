@@ -37,7 +37,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamRelay do
           required(:first_event_retry) => (relay_state(), binary(), StreamProtocol.terminal_failure() ->
                                              first_event_retry_result()),
           required(:write_chunk) => (relay_state(), binary() -> stream_write_result()),
-          required(:write_keepalive) => (relay_state() -> {:ok, relay_state()} | {:error, term()}),
+          required(:write_keepalive) => (relay_state() -> {:ok, relay_state()} | {:error, term()} | {:error, term(), relay_state()}),
           optional(:before_finalize_failure) => (relay_state(), term() ->
                                                    before_finalize_failure_result()),
           optional(:before_finalize_success) => (relay_state() ->
@@ -111,6 +111,11 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamRelay do
 
   defp stream_keepalive_result({:ok, state}, _previous_state, chunks, _response),
     do: {:cont, state, chunks}
+
+  defp stream_keepalive_result({:error, reason, state}, _previous_state, chunks, response) do
+    source_cancel(response)
+    {:error, state, chunks, {:chunk, reason}}
+  end
 
   defp stream_keepalive_result({:error, reason}, state, chunks, response) do
     source_cancel(response)

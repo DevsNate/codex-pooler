@@ -193,6 +193,11 @@ defmodule CodexPooler.Gateway.Payloads.CompactionTrigger do
           result_mode()
         ) ::
           {:ok, Contracts.gateway_result()} | {:error, Contracts.gateway_error()}
+  # Native HTTP V2 may already own a deferred, validated SSE collector.
+  def adapt_gateway_result({:ok, %{status: 200, deferred_stream: stream} = result}, :sse)
+      when is_function(stream, 1),
+      do: {:ok, result}
+
   def adapt_gateway_result({:ok, %{status: status} = result}, mode)
       when mode in [:sse, :public_sse, :response, :websocket, :native_websocket] and
              is_integer(status) and

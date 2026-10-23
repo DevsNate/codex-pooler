@@ -14,6 +14,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
   alias CodexPooler.Gateway.Runtime.Finalization.Streaming
   alias CodexPooler.Gateway.Runtime.RateLimitObserver
   alias CodexPooler.Gateway.Runtime.Streaming.CompactionResultCollector
+  alias CodexPooler.Gateway.Runtime.Streaming.CompactionStream
   alias CodexPooler.Gateway.Runtime.Streaming.DownstreamDeliveryEvidence
   alias CodexPooler.Gateway.Runtime.Streaming.DownstreamStream
   alias CodexPooler.Gateway.Runtime.Streaming.OpenAIStreamCollector
@@ -52,6 +53,9 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
     finalization_callbacks = Map.fetch!(callbacks, :finalization_callbacks)
 
     cond do
+      native_http_compaction?(context.request_options) ->
+        CompactionStream.result(response, context, finalization_callbacks)
+
       CompactionTrigger.streaming_result?(context.request_options) ->
         CompactionResultCollector.collect(response, context, finalization_callbacks)
 
@@ -64,6 +68,13 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
       true ->
         relay_streaming_result(response, context, callbacks)
     end
+  end
+
+  defp native_http_compaction?(options) do
+    CompactionTrigger.streaming_result?(options) and
+      options.openai_compatibility.source_endpoint != "/v1/responses" and
+      options.transport.transport != "websocket" and
+      is_nil(options.transport.websocket_writer)
   end
 
   defp relay_streaming_result(response, %SelectedCandidateContext{} = context, callbacks) do

@@ -77,17 +77,22 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   # `websocket_idle_timeout_ms`. ThousandIsland re-arms it only on bytes from
   # the client, never on a frame this socket pushes, and the released client
   # sends nothing while it reads a response, so a turn streaming longer than the
-  # bound was closed in the middle (findings#302). Every third of the bound the
+  # bound was closed in the middle (findings#302). At most ten seconds apart the
   # socket pings the client when a turn delivered client-visible frames since
   # the previous tick: the client's pong re-arms the read timer. A turn that
-  # showed nothing gets no ping, so a stalled turn is still closed by the bound.
+  # showed nothing gets no ping, so an ordinary stalled turn retains its bound.
+  # Native compaction is different: its collector deliberately withholds all
+  # provider frames until validation. Keep that active wait alive with a ping
+  # and an ignored JSON event (the client's response idle timer ignores pings).
+  # Neither is delivery evidence or owner progress; upstream receive deadlines
+  # still bound stalled providers, and the client must still answer the ping.
   # The same tick tells each owner-forwarded task that progressed
   # (`DownstreamProgress`): a remote owner's submission waits on those notices.
   # The tick carries the counts it saw instead of keeping them in the state
   # (socket tests compare whole states). The interval reads the settings the
   # upgrade read a moment earlier.
   defp start_downstream_keepalive({:ok, _state} = result) do
-    interval_ms = max(div(OperationalSettings.current().websocket_idle_timeout_ms, 3), 1)
+    interval_ms = OperationalSettings.current().websocket_idle_timeout_ms |> div(3) |> min(10_000) |> max(1)
     :ok = schedule_downstream_keepalive(interval_ms, %{})
     result
   end
@@ -113,6 +118,15 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
 
   defp progressed_tasks(delivered_frames, previous_frames),
     do: for({task, frames} <- delivered_frames, frames > Map.get(previous_frames, task, 0), do: task)
+
+  defp collecting_compaction?(state) do
+    state
+    |> Map.get(:response_task_compaction_collectors, MapSet.new())
+    |> Enum.any?(fn pid ->
+      MapSet.member?(Map.get(state, :tasks, MapSet.new()), pid) and
+        is_nil(downstream_delivery_evidence(state, pid).terminal_class)
+    end)
+  end
 
   defp initialize_socket(state) do
     started_at = System.monotonic_time(:millisecond)
@@ -370,13 +384,13 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     delivered_frames = delivered_frames_by_task(state)
     :ok = schedule_downstream_keepalive(interval_ms, delivered_frames)
 
-    case progressed_tasks(delivered_frames, previous_frames) do
-      [] ->
-        {:ok, state}
+    tasks = progressed_tasks(delivered_frames, previous_frames)
+    if owner_forwarded_socket?(state), do: Enum.each(tasks, &DownstreamProgress.notify/1)
 
-      tasks ->
-        if owner_forwarded_socket?(state), do: Enum.each(tasks, &DownstreamProgress.notify/1)
-        {:push, {:ping, ""}, state}
+    cond do
+      collecting_compaction?(state) -> {:push, [{:ping, ""}, {:text, ~s({"type":"keepalive"})}], state}
+      tasks != [] -> {:push, {:ping, ""}, state}
+      true -> {:ok, state}
     end
   end
 

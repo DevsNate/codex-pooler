@@ -287,6 +287,18 @@ defmodule CodexPoolerWeb.GatewayControllerHelpers do
     response
   end
 
+  # A validating collector can delay commitment until its first keepalive. Fast
+  # failures retain their HTTP status; failures after that are SSE terminals.
+  defp do_send_gateway_result(conn, %{deferred_stream: stream} = result) do
+    conn = put_gateway_headers(conn, result_headers(result))
+
+    case stream.(conn) do
+      {:ok, streamed_conn} -> streamed_conn
+      {:error, error} -> conn |> delete_resp_header("content-type") |> do_send_error(error)
+      {:error, reason, streamed_conn} -> late_stream_failure(streamed_conn, reason)
+    end
+  end
+
   defp do_send_gateway_result(conn, %{stream: stream} = result) do
     conn = put_gateway_headers(conn, result_headers(result))
     conn = send_chunked(conn, result.status)
@@ -298,14 +310,7 @@ defmodule CodexPoolerWeb.GatewayControllerHelpers do
       {:error, reason} ->
         # The response is already chunked, so a late stream error cannot be
         # translated into a structured JSON error for the client.
-        Logger.warning([
-          "late gateway stream failed",
-          " path=#{conn.request_path}",
-          " request_id=#{request_id(conn) || "unknown"}",
-          " reason=#{ErrorSanitizer.safe_reason(reason)}"
-        ])
-
-        conn
+        late_stream_failure(conn, reason)
     end
   end
 
@@ -321,6 +326,17 @@ defmodule CodexPoolerWeb.GatewayControllerHelpers do
     |> put_gateway_headers(result_headers(result))
     |> put_status(result.status)
     |> json(body)
+  end
+
+  defp late_stream_failure(conn, reason) do
+    Logger.warning([
+      "late gateway stream failed",
+      " path=#{conn.request_path}",
+      " request_id=#{request_id(conn) || "unknown"}",
+      " reason=#{ErrorSanitizer.safe_reason(reason)}"
+    ])
+
+    conn
   end
 
   defp do_send_error(conn, %{status: status, code: code, message: message} = error) do
